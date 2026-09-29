@@ -15,7 +15,6 @@ jobs:
     timeout-minutes: 15
     env:
       AUDIOFLOW_SMOKE_OUTPUT: '0'
-      AUDIOFLOW_TEST_ROOT: ${{ runner.temp }}/audioflow-tests
     steps:
       - uses: actions/checkout@v6
         with:
@@ -30,4 +29,6 @@ jobs:
       - name: Check version synchronization
         run: ./installer/Sync-Version.ps1 -Check
       - name: Run offline regression checks
+        env:
+          AUDIOFLOW_TEST_ROOT: ${{ runner.temp }}/audioflow-tests
         run: dotnet tests/Regression/bin/Release/net8.0-windows/Regression.dll
