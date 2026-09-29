@@ -9,6 +9,28 @@ AudioFlow brings per-app volume, output devices, saved listening profiles, and a
 > **The DSP chain is not connected to live system audio from Spotify, games, or other applications.**
 > System-wide EQ, Equalizer APO integration, and HRTF surround remain planned.
 
+## Screenshots
+
+Actual AudioFlow 0.2.21 screenshots supplied from a local Windows installation.
+
+### Equalizer preview
+
+![AudioFlow equalizer showing eleven editable bands and the preview-only notice](docs/screenshots/equalizer-preview.png)
+
+Eleven starting bands with editable tuning. EQ affects AudioFlow's own sample only; the DSP chain is not connected to live system audio. The displayed curve is an example of UI adjustments, not a recommended listening preset.
+
+### Mixer and profiles
+
+![AudioFlow mixer showing output selection, master volume, per-app controls, and saved profiles](docs/screenshots/mixer.png)
+
+Windows audio sessions, output selection, volume/mute controls, saved profiles, and the automation entry point. This capture shows idle sessions and a disconnected saved output; it does not demonstrate active playback or an automation rule firing.
+
+### Settings
+
+![AudioFlow settings showing packaged startup management, tray preferences, and local diagnostics](docs/screenshots/settings.png)
+
+Startup and tray options with local diagnostics. The Windows user-folder path is covered for privacy; the rest of the screenshot is unchanged. The packaged build manages startup through Windows Settings.
+
 ## What works today
 
 | Area | Implemented behavior |
