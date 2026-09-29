@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose an improvement grounded in a user problem
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Alternatives and constraints
+      description: Include Windows integration, licensing, or hardware requirements if relevant.

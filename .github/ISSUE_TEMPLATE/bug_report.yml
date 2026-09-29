@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible AudioFlow problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Remove private paths, device identifiers, settings, and credentials. Use SECURITY.md for vulnerabilities."
+  - type: input
+    id: version
+    attributes:
+      label: AudioFlow version or commit
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and deployment
+      description: Include build number and source, portable, or MSIX deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Screenshots, relevant log excerpts, or device category. EQ preview does not process other applications.

@@ -1,0 +1,47 @@
+# Build output, local packaging, and scratch work
+**/bin/
+**/obj/
+publish/
+outputs/
+artifacts/
+work/
+TestResults/
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.log
+*.dmp
+*.tmp
+*.bak
+*.backup
+# Local profiles, device identifiers, and recovery data
+settings.json*
+appsettings.Local.json
+# Credentials, signing material, generated installers
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.snk
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.exe
+*.dll
+*.pdb
+*.zip
+*.7z
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
