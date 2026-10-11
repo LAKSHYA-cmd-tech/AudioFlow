@@ -1,3 +1,5 @@
+> Historical roadmap for the previous WPF prototype. See README.md for the current Desktop WinUI version.
+
 # Roadmap
 
 These are development intentions, not commitments or delivery dates.

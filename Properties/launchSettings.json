@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "AudioFlow (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "AudioFlow (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

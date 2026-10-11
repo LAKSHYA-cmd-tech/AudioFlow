@@ -1,0 +1,1148 @@
+--- a/EndpointsCommon/minwavert.h
++++ b/EndpointsCommon/minwavert.h
+@@ -15,6 +15,8 @@ Abstract:
+ #ifndef _SYSVAD_MINWAVERT_H_
+ #define _SYSVAD_MINWAVERT_H_
+ 
++#include "AudioFlowLoopback.h"
++
+ #ifdef SYSVAD_BTH_BYPASS
+ #include "bthhfpmicwavtable.h"
+ #endif // SYSVAD_BTH_BYPASS
+@@ -135,6 +137,8 @@ class CMiniportWaveRT :
+     public CUnknown
+ {
+ private:
++    AudioFlowLoopback*                   m_AudioFlowLoopback;
++    KSPIN_LOCK                          m_AudioFlowLoopbackLock;
+     ULONG                               m_ulLoopbackAllocated;
+     ULONG                               m_ulSystemAllocated;
+     ULONG                               m_ulOffloadAllocated;
+@@ -188,6 +192,13 @@ protected:
+ 
+ 
+ public:
++    ULONG AcquireLoopbackSource();
++    BOOL UsesAudioFlowLoopback() const { return m_AudioFlowLoopback != NULL; }
++    VOID ReleaseLoopbackSource(ULONG Source);
++    VOID ResetLoopbackSource(ULONG Source);
++    VOID PublishLoopback(ULONG Source, ULONGLONG Frame, const BYTE* Buffer, ULONG Bytes);
++    VOID CaptureLoopback(ULONGLONG Frame, BYTE* Buffer, ULONG Bytes);
++    VOID MuteLoopback(BOOL Muted);
+     DECLARE_PROPERTYHANDLER(Get_SoundDetectorSupportedPatterns);
+     DECLARE_PROPERTYHANDLER(Set_SoundDetectorPatterns);
+     DECLARE_PROPERTYHANDLER(Get_SoundDetectorArmed);
+@@ -288,6 +299,7 @@ public:
+         _In_opt_        PVOID                                   DeviceContext
+     )
+         :CUnknown(0),
++        m_AudioFlowLoopback(NULL),
+         m_ulMaxSystemStreams(0),
+         m_ulMaxOffloadStreams(0),
+         m_ulMaxLoopbackStreams(0),
+@@ -375,6 +387,7 @@ public:
+ #endif // defined(SYSVAD_BTH_BYPASS) || defined(SYSVAD_USB_SIDEBAND)
+ 
+         KeInitializeSpinLock(&m_DeviceFormatsAndModesLock);
++        KeInitializeSpinLock(&m_AudioFlowLoopbackLock);
+         m_DeviceFormatsAndModesIrql = PASSIVE_LEVEL;
+     }
+ 
+--- a/EndpointsCommon/minwavert.cpp
++++ b/EndpointsCommon/minwavert.cpp
+@@ -28,6 +28,95 @@ Abstract:
+ 
+ #define EFFECTS_LIST_COUNT 2
+ 
++// Lock order: stream position lock -> mixer lock. The mixer never touches streams.
++// Every callback holds the stream's miniport reference; teardown drains its timer first.
++#pragma code_seg()
++ULONG CMiniportWaveRT::AcquireLoopbackSource()
++{
++    KIRQL irql;
++    KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++    ULONG source = m_AudioFlowLoopback ? m_AudioFlowLoopback->Acquire() : AudioFlowLoopback::InvalidSource;
++    KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++    return source;
++}
++
++VOID CMiniportWaveRT::ReleaseLoopbackSource(ULONG Source)
++{
++    KIRQL irql;
++    KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++    if (m_AudioFlowLoopback) m_AudioFlowLoopback->Release(Source);
++    KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++}
++
++VOID CMiniportWaveRT::ResetLoopbackSource(ULONG Source)
++{
++    KIRQL irql;
++    KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++    if (m_AudioFlowLoopback) m_AudioFlowLoopback->Reset(Source);
++    KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++}
++
++VOID CMiniportWaveRT::MuteLoopback(BOOL Muted)
++{
++    KIRQL irql;
++    KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++    if (m_AudioFlowLoopback) m_AudioFlowLoopback->SetMuted(Muted != FALSE);
++    KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++}
++
++VOID CMiniportWaveRT::PublishLoopback(ULONG Source, ULONGLONG Frame, const BYTE* Buffer, ULONG Bytes)
++{
++    // Bound work under each lock, even when a delayed timer catches up.
++    while (Bytes >= AudioFlowLoopback::FrameBytes)
++    {
++        const ULONG frames = min(Bytes / AudioFlowLoopback::FrameBytes, 256UL);
++        KIRQL irql;
++        KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++        if (m_AudioFlowLoopback) m_AudioFlowLoopback->Write(Source, Frame,
++            reinterpret_cast<const short*>(Buffer), frames);
++        KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++        Frame += frames;
++        Buffer += frames * AudioFlowLoopback::FrameBytes;
++        Bytes -= frames * AudioFlowLoopback::FrameBytes;
++    }
++}
++
++VOID CMiniportWaveRT::CaptureLoopback(ULONGLONG Frame, BYTE* Buffer, ULONG Bytes)
++{
++    while (Bytes >= AudioFlowLoopback::FrameBytes)
++    {
++        const ULONG frames = min(Bytes / AudioFlowLoopback::FrameBytes, 256UL);
++        KIRQL irql;
++        KeAcquireSpinLock(&m_AudioFlowLoopbackLock, &irql);
++        if (m_AudioFlowLoopback) m_AudioFlowLoopback->Read(Frame,
++            reinterpret_cast<short*>(Buffer), frames);
++        else RtlZeroMemory(Buffer, frames * AudioFlowLoopback::FrameBytes);
++        KeReleaseSpinLock(&m_AudioFlowLoopbackLock, irql);
++        Frame += frames;
++        Buffer += frames * AudioFlowLoopback::FrameBytes;
++        Bytes -= frames * AudioFlowLoopback::FrameBytes;
++    }
++}
++
++// Windows 11 24H2 asks the loopback pin which tap point it supports.
++#pragma code_seg("PAGE")
++NTSTATUS PropertyHandler_AudioFlowLoopbackCaps(_In_ PPCPROPERTY_REQUEST Request)
++{
++    PAGED_CODE();
++    if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT)
++        return PropertyHandler_BasicSupport(Request, Request->PropertyItem->Flags, VT_UI4);
++    if (!(Request->Verb & KSPROPERTY_TYPE_GET)) return STATUS_INVALID_DEVICE_REQUEST;
++    if (Request->ValueSize == 0)
++    {
++        Request->ValueSize = sizeof(ULONG);
++        return STATUS_BUFFER_OVERFLOW;
++    }
++    if (Request->ValueSize < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
++    *static_cast<ULONG*>(Request->Value) = AUDIOLOOPBACK_TAPPOINT_CAPS_PREVOLUMEMUTE;
++    Request->ValueSize = sizeof(ULONG);
++    return STATUS_SUCCESS;
++}
++
+ //=============================================================================
+ // CMiniportWaveRT
+ //=============================================================================
+@@ -121,6 +210,12 @@ Return Value:
+ 
+     DPF_ENTER(("[CMiniportWaveRT::~CMiniportWaveRT]"));
+ 
++    if (m_AudioFlowLoopback)
++    {
++        ExFreePoolWithTag(m_AudioFlowLoopback, MINWAVERT_POOLTAG);
++        m_AudioFlowLoopback = NULL;
++    }
++
+     if (m_pDeviceFormat)
+     {
+         ExFreePoolWithTag( m_pDeviceFormat, MINWAVERT_POOLTAG );
+@@ -405,6 +500,14 @@ Return Value:
+     m_LoopbackProtection                = CONSTRICTOR_OPTION_DISABLE;
+     RtlZeroMemory(&m_MixDrmRights, sizeof(m_MixDrmRights));
+ 
++    if (m_DeviceType == eSpeakerDevice)
++    {
++        m_AudioFlowLoopback = static_cast<AudioFlowLoopback*>(ExAllocatePool2(
++            POOL_FLAG_NON_PAGED, sizeof(AudioFlowLoopback), MINWAVERT_POOLTAG));
++        if (!m_AudioFlowLoopback) return STATUS_INSUFFICIENT_RESOURCES;
++        m_AudioFlowLoopback->Initialize();
++    }
++
+     // 
+     // For port notification support.
+     //
+@@ -1429,6 +1532,13 @@ Remarks
+             // Return mode to caller.
+             *_pSignalProcessingMode = signalProcessingModeAttribute->SignalProcessingMode;
+         }
++        else if (attributeHeader->Attribute == KSATTRIBUTEID_AUDIOLOOPBACK_TAPPOINT)
++        {
++            if (attributeHeader->Size != sizeof(KSATTRIBUTE_AUDIOLOOPBACK_TAPPOINT) ||
++                cbRemaining < sizeof(KSATTRIBUTE_AUDIOLOOPBACK_TAPPOINT)) return STATUS_INVALID_PARAMETER;
++            const auto tap = reinterpret_cast<const KSATTRIBUTE_AUDIOLOOPBACK_TAPPOINT*>(attributeHeader);
++            if (tap->TapPoint != AUDIOLOOPBACK_TAPPOINT_PREVOLUMEMUTE) return STATUS_NOT_SUPPORTED;
++        }
+         else
+         {
+             return STATUS_NOT_SUPPORTED;
+@@ -1436,6 +1546,7 @@ Remarks
+ 
+         // Adjust pointer and buffer size to next attribute (QWORD aligned)
+         ULONG cbAttribute = ((attributeHeader->Size + FILE_QUAD_ALIGNMENT) & ~FILE_QUAD_ALIGNMENT);
++        if (cbAttribute < attributeHeader->Size || cbAttribute > cbRemaining) return STATUS_INVALID_PARAMETER;
+ 
+         attributeHeader = (PKSATTRIBUTE) (((PBYTE)attributeHeader) + cbAttribute);
+         cbRemaining -= cbAttribute;
+@@ -2432,6 +2543,8 @@ Return Value:
+         m_pDrmPort->DestroyContent(m_ulMixDrmContentId);
+         m_ulMixDrmContentId = ulMixDrmContentId;
+         RtlCopyMemory(&m_MixDrmRights, &MixDrmRights, sizeof(m_MixDrmRights));
++        MuteLoopback(m_MixDrmRights.CopyProtect || m_MixDrmRights.DigitalOutputDisable ||
++            m_LoopbackProtection == CONSTRICTOR_OPTION_MUTE);
+ 
+         //
+         // At this point the driver should enforce the new DrmRights.
+--- a/EndpointsCommon/minwavertstream.h
++++ b/EndpointsCommon/minwavertstream.h
+@@ -91,6 +91,8 @@ public:
+ protected:
+     CMiniportWaveRT*            m_pMiniport;
+     ULONG                       m_ulPin;
++    ULONG                       m_AudioFlowSource;
++    ULONGLONG                   m_AudioFlowStartFrame;
+     BOOLEAN                     m_bCapture;
+     BOOLEAN                     m_bUnregisterStream;
+     ULONG                       m_ulDmaBufferSize;
+--- a/EndpointsCommon/minwavertstream.cpp
++++ b/EndpointsCommon/minwavertstream.cpp
+@@ -4,6 +4,7 @@
+ #include "simple.h"
+ #include "minwavert.h"
+ #include "minwavertstream.h"
++#include "AudioFlowTiming.h"
+ #include "UnittestData.h"
+ #include "AudioModuleHelper.h"
+ #define MINWAVERTSTREAM_POOLTAG 'SRWM'
+@@ -35,8 +36,16 @@ Return Value:
+ --*/
+ {
+     PAGED_CODE();
++    // Drain callbacks before releasing the miniport or any stream-owned memory.
++    if (m_pNotificationTimer)
++    {
++        ExDeleteTimer(m_pNotificationTimer, TRUE, TRUE, NULL);
++        m_pNotificationTimer = NULL;
++    }
++    KeFlushQueuedDpcs();
+     if (NULL != m_pMiniport)
+     {
++        m_pMiniport->ReleaseLoopbackSource(m_AudioFlowSource);
+         if (m_pAudioModules)
+         {
+             m_pMiniport->FreeStreamAudioModules(m_pAudioModules, m_AudioModuleCount);
+@@ -215,6 +224,8 @@ Return Value:
+ 
+     m_pMiniport = NULL;
+     m_ulPin = 0;
++    m_AudioFlowSource = AudioFlowLoopback::InvalidSource;
++    m_AudioFlowStartFrame = 0;
+     m_bUnregisterStream = FALSE;
+     m_bCapture = FALSE;
+     m_ulDmaBufferSize = 0;
+@@ -344,7 +355,13 @@ Return Value:
+         return ntStatus;
+     }
+ 
+-    if (m_bCapture)
++    if (!m_bCapture && m_pMiniport->m_DeviceType == eSpeakerDevice)
++    {
++        m_AudioFlowSource = m_pMiniport->AcquireLoopbackSource();
++        if (m_AudioFlowSource == AudioFlowLoopback::InvalidSource) return STATUS_INSUFFICIENT_RESOURCES;
++    }
++
++    if (m_bCapture && !m_pMiniport->IsLoopbackPin(Pin_))
+     {
+         ReadRegistrySettings();
+             DWORD toneFrequency = 0;
+@@ -414,7 +431,7 @@ Return Value:
+             return ntStatus;
+         }
+     }
+-    else if (!g_DoNotCreateDataFiles)
++    else if (!m_bCapture && !g_DoNotCreateDataFiles)
+     {
+         //
+         // Create an output file for the render data.
+@@ -749,8 +766,11 @@ VOID CMiniportWaveRTStream::GetHWLatency
+     ASSERT(Latency_);
+ 
+     Latency_->ChipsetDelay = 0;
+-    Latency_->CodecDelay = 0;
++    // This virtual device has no hardware FIFO, chipset, or codec latency.
++    // AudioFlowLoopback's history delay is software transport buffering; it
++    // must not be advertised as latency of the WaveRT hardware data path.
+     Latency_->FifoSize = 0;
++    Latency_->CodecDelay = 0;
+ }
+ 
+ //=============================================================================
+@@ -984,6 +1004,8 @@ NTSTATUS CMiniportWaveRTStream::GetReadPacket
+     ULONGLONG deltaLinearPosition = ullLinearPosition + carryForwardBytes - linearPositionOfAvailablePacket;
+     ULONGLONG deltaTimeInHns = deltaLinearPosition * 10000000 / m_ulDmaMovementRate;
+     ULONGLONG timeOfAvailablePacketInHns = ullDmaTimeStamp - deltaTimeInHns;
++    if (m_pMiniport->m_DeviceType == eSpeakerDevice)
++        timeOfAvailablePacketInHns -= static_cast<ULONGLONG>(AudioFlowLoopback::DelayFrames) * 10000000 / AudioFlowLoopback::SampleRate;
+     ULONGLONG timeOfAvailablePacketInQpc = timeOfAvailablePacketInHns * m_ullPerformanceCounterFrequency.QuadPart / 10000000;
+ 
+     *PerformanceCounterValue = timeOfAvailablePacketInQpc;
+@@ -1166,9 +1188,16 @@ NTSTATUS CMiniportWaveRTStream::SetState
+                                 m_ulCurrentWritePosition, // replace with the previous WaveRtBufferWritePosition that the driver received
+                                 State_, // replace with the correct "Data length completed"
+                                 0); // always zero
++    if (State_ == m_KsState) return STATUS_SUCCESS;
++    if (m_KsState == KSSTATE_RUN && State_ != KSSTATE_RUN && m_ulNotificationIntervalMs > 0)
++    {
++        ExCancelTimer(m_pNotificationTimer, NULL);
++        KeFlushQueuedDpcs();
++    }
+     switch (State_)
+     {
+         case KSSTATE_STOP:
++            m_pMiniport->ResetLoopbackSource(m_AudioFlowSource);
+             if (m_KsState == KSSTATE_ACQUIRE)
+             {
+                 // Acquire stream resources
+@@ -1208,6 +1237,9 @@ NTSTATUS CMiniportWaveRTStream::SetState
+             m_ulLastOsWritePacket = ULONG_MAX;
+             m_bEoSReceived = FALSE;
+             m_bLastBufferRendered = FALSE;
++            m_hnsElapsedTimeCarryForward = 0;
++            m_byteDisplacementCarryForward = 0;
++            m_hnsDPCTimeCarryForward = 0;
+ 
+             KeReleaseSpinLock(&m_PositionSpinLock, oldIrql);
+ 
+@@ -1341,9 +1373,24 @@ NTSTATUS CMiniportWaveRTStream::SetState
+             {
+                 m_pMiniport->m_KeywordDetector.Run();
+             }
++            KeAcquireSpinLock(&m_PositionSpinLock, &oldIrql);
+             ullPerfCounterTemp = KeQueryPerformanceCounter(&m_ullPerformanceCounterFrequency);
+             m_ullLastDPCTimeStamp = m_ullDmaTimeStamp = KSCONVERT_PERFORMANCE_TIME(m_ullPerformanceCounterFrequency.QuadPart, ullPerfCounterTemp);
++            // Both directions use the same QPC clock, regardless of stream start order.
++            if (m_pMiniport->m_DeviceType == eSpeakerDevice)
++            {
++                const ULONGLONG ticks = ullPerfCounterTemp.QuadPart;
++                const ULONGLONG frequency = m_ullPerformanceCounterFrequency.QuadPart;
++                const ULONGLONG clockFrame = (ticks / frequency) * AudioFlowLoopback::SampleRate +
++                    (ticks % frequency) * AudioFlowLoopback::SampleRate / frequency;
++                m_AudioFlowStartFrame = clockFrame - m_ullLinearPosition / AudioFlowLoopback::FrameBytes;
++                m_hnsElapsedTimeCarryForward = 0;
++                m_byteDisplacementCarryForward = 0;
++                m_pMiniport->ResetLoopbackSource(m_AudioFlowSource);
++            }
+ 
++            m_KsState = State_;
++            KeReleaseSpinLock(&m_PositionSpinLock, oldIrql);
+             if (m_ulNotificationIntervalMs > 0)
+             {
+                 // Set timer for 1 ms. This will cause DPC to run every 1 ms but driver will send out 
+@@ -1363,7 +1410,9 @@ NTSTATUS CMiniportWaveRTStream::SetState
+             break;
+     }
+ 
++    KeAcquireSpinLock(&m_PositionSpinLock, &oldIrql);
+     m_KsState = State_;
++    KeReleaseSpinLock(&m_PositionSpinLock, oldIrql);
+ 
+ #if defined(SYSVAD_BTH_BYPASS) || defined(SYSVAD_USB_SIDEBAND)
+ Done:
+@@ -1427,7 +1476,7 @@ VOID CMiniportWaveRTStream::UpdatePosition
+ 
+     if (m_bCapture)
+     {
+-        // Write sine wave to buffer.
++        // Return actual mixed render data on loopback pins.
+         WriteBytes(ByteDisplacement);
+     }
+     else
+@@ -1469,9 +1518,9 @@ VOID CMiniportWaveRTStream::UpdatePosition
+                                         0);
+         }
+ 
+-        if (!g_DoNotCreateDataFiles)
++        if (!g_DoNotCreateDataFiles || m_AudioFlowSource != AudioFlowLoopback::InvalidSource)
+         {
+-            // Read from buffer and write to a file.
++            // Publish consumed render frames, optionally saving diagnostic audio.
+             ReadBytes(ByteDisplacement);
+         }
+     }
+@@ -1486,6 +1535,8 @@ VOID CMiniportWaveRTStream::UpdatePosition
+     // so m_ullLinearPosition needs to be updated accordingly here
+     //
+     m_ullLinearPosition += ByteDisplacement;
++    if (m_pMiniport->m_DeviceType == eSpeakerDevice && m_ulNotificationsPerBuffer)
++        m_llPacketCounter = m_ullLinearPosition / (m_ulDmaBufferSize / m_ulNotificationsPerBuffer);
+     
+     // Update the DMA time stamp for the next call to GetPosition()
+     //
+@@ -1502,21 +1553,33 @@ VOID CMiniportWaveRTStream::WriteBytes
+ 
+ Routine Description:
+ 
+-This function writes the audio buffer using a sine wave generator
++This function writes mixed render audio to loopback, or sample capture data on unused capture endpoints.
+ Arguments:
+ 
+ ByteDisplacement - # of bytes to process.
+ 
+ --*/
+ {
+-    ULONG bufferOffset = m_ullLinearPosition % m_ulDmaBufferSize;
++    if (!m_pDmaBuffer || !m_ulDmaBufferSize) return;
++    const ULONG skipped = ByteDisplacement > m_ulDmaBufferSize ? ByteDisplacement - m_ulDmaBufferSize : 0;
++    ByteDisplacement -= skipped;
++    ULONG bufferOffset = (m_ullLinearPosition + skipped) % m_ulDmaBufferSize;
++    ULONGLONG frame = m_AudioFlowStartFrame + (m_ullLinearPosition + skipped) / AudioFlowLoopback::FrameBytes;
+ 
+     // Normally this will loop no more than once for a single wrap, but if
+     // many bytes have been displaced then this may loops many times.
+     while (ByteDisplacement > 0)
+     {
+         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
+-            m_ToneGenerator.GenerateSine(m_pDmaBuffer + bufferOffset, runWrite);
++        if (m_pMiniport->IsLoopbackPin(m_ulPin))
++        {
++            if (frame >= AudioFlowLoopback::DelayFrames)
++                m_pMiniport->CaptureLoopback(frame - AudioFlowLoopback::DelayFrames,
++                    m_pDmaBuffer + bufferOffset, runWrite);
++            else RtlZeroMemory(m_pDmaBuffer + bufferOffset, runWrite);
++        }
++        else m_ToneGenerator.GenerateSine(m_pDmaBuffer + bufferOffset, runWrite);
++        frame += runWrite / AudioFlowLoopback::FrameBytes;
+         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
+         ByteDisplacement -= runWrite;
+     }
+@@ -1532,7 +1595,7 @@ VOID CMiniportWaveRTStream::ReadBytes
+ 
+ Routine Description:
+ 
+-This function reads the audio buffer and saves the data in a file.
++This function publishes rendered audio to the mixer and optionally saves diagnostics.
+ 
+ Arguments:
+ 
+@@ -1540,14 +1603,24 @@ ByteDisplacement - # of bytes to process.
+ 
+ --*/
+ {
+-    ULONG bufferOffset = m_ullLinearPosition % m_ulDmaBufferSize;
++    if (!m_pDmaBuffer || !m_ulDmaBufferSize) return;
++    const ULONG skipped = ByteDisplacement > m_ulDmaBufferSize ? ByteDisplacement - m_ulDmaBufferSize : 0;
++    ByteDisplacement -= skipped;
++    ULONG bufferOffset = (m_ullLinearPosition + skipped) % m_ulDmaBufferSize;
++    ULONGLONG frame = m_AudioFlowStartFrame + (m_ullLinearPosition + skipped) / AudioFlowLoopback::FrameBytes;
+ 
+     // Normally this will loop no more than once for a single wrap, but if
+     // many bytes have been displaced then this may loops many times.
+     while (ByteDisplacement > 0)
+     {
+         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
+-        m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
++        if (m_AudioFlowSource != AudioFlowLoopback::InvalidSource)
++            m_pMiniport->PublishLoopback(m_AudioFlowSource, frame, m_pDmaBuffer + bufferOffset, runWrite);
++        if (!g_DoNotCreateDataFiles) m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
++        // Consumed bytes must not replay if the producer underruns on the next lap.
++        if (m_AudioFlowSource != AudioFlowLoopback::InvalidSource)
++            RtlZeroMemory(m_pDmaBuffer + bufferOffset, runWrite);
++        frame += runWrite / AudioFlowLoopback::FrameBytes;
+         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
+         ByteDisplacement -= runWrite;
+     }
+@@ -1584,7 +1657,7 @@ Return Value:
+     DPF_ENTER(("[CMiniportWaveRT::SetContentId]"));
+ 
+     NTSTATUS    ntStatus;
+-    ULONG       ulOldContentId = contentId;
++    ULONG       ulOldContentId = m_ulContentId;
+ 
+     m_ulContentId = contentId;
+ 
+@@ -1599,6 +1672,8 @@ Return Value:
+     if (!NT_SUCCESS(ntStatus))
+     {
+         m_ulContentId = ulOldContentId;
++        if (drmRights->CopyProtect || drmRights->DigitalOutputDisable)
++            m_pMiniport->MuteLoopback(TRUE);
+     }
+ 
+     //
+@@ -1750,6 +1825,11 @@ TimerNotifyRT
+ 
+     KIRQL oldIrql;
+     KeAcquireSpinLock(&_this->m_PositionSpinLock, &oldIrql);
++    if (_this->m_KsState != KSSTATE_RUN)
++    {
++        KeReleaseSpinLock(&_this->m_PositionSpinLock, oldIrql);
++        return;
++    }
+ 
+     qpc = KeQueryPerformanceCounter(&qpcFrequency);
+ 
+@@ -1765,6 +1845,12 @@ TimerNotifyRT
+     {
+         // Carry forward the time greater than notification interval to adjust time to signal next buffer completion event accordingly.
+         _this->m_hnsDPCTimeCarryForward = hnsCurrentTime - _this->m_ullLastDPCTimeStamp + _this->m_hnsDPCTimeCarryForward - (_this->m_ulNotificationIntervalMs * 10000);
++        if (_this->m_pMiniport->UsesAudioFlowLoopback())
++        {
++            const ULONGLONG period = static_cast<ULONGLONG>(_this->m_ulNotificationIntervalMs) * 10000;
++            _this->m_hnsDPCTimeCarryForward = AudioFlowNotificationRemainder(
++                _this->m_hnsDPCTimeCarryForward, period);
++        }
+         // Save the last time DPC ran at notification interval
+         _this->m_ullLastDPCTimeStamp = hnsCurrentTime;
+         bufferCompleted = TRUE;
+@@ -1777,7 +1863,7 @@ TimerNotifyRT
+ 
+     _this->UpdatePosition(qpc);
+ 
+-    if (!_this->m_bEoSReceived)
++    if (!_this->m_bEoSReceived && !_this->m_pMiniport->UsesAudioFlowLoopback())
+     {
+         _this->m_llPacketCounter++;
+     }
+--- a/EndpointsCommon/speakerwavtable.h
++++ b/EndpointsCommon/speakerwavtable.h
+@@ -19,20 +19,20 @@ Abstract:
+ #include "AudioModule0.h"
+ #include "AudioModule1.h"
+ 
+-// To keep the code simple assume device supports only 48KHz, 16-bit, stereo (PCM and NON-PCM)
++// AudioFlow v0.2: every active streaming pin uses stereo 48 kHz, 16-bit PCM.
+ 
+ #define SPEAKER_DEVICE_MAX_CHANNELS                 2       // Max Channels.
+ 
+ #define SPEAKER_HOST_MAX_CHANNELS                   2       // Max Channels.
+ #define SPEAKER_HOST_MIN_BITS_PER_SAMPLE            16      // Min Bits Per Sample
+ #define SPEAKER_HOST_MAX_BITS_PER_SAMPLE            16      // Max Bits Per Sample
+-#define SPEAKER_HOST_MIN_SAMPLE_RATE                24000   // Min Sample Rate
+-#define SPEAKER_HOST_MAX_SAMPLE_RATE                96000   // Max Sample Rate
++#define SPEAKER_HOST_MIN_SAMPLE_RATE                48000   // Min Sample Rate
++#define SPEAKER_HOST_MAX_SAMPLE_RATE                48000   // Max Sample Rate
+ 
+ #define SPEAKER_OFFLOAD_MAX_CHANNELS                2       // Max Channels.
+ #define SPEAKER_OFFLOAD_MIN_BITS_PER_SAMPLE         16      // Min Bits Per Sample
+ #define SPEAKER_OFFLOAD_MAX_BITS_PER_SAMPLE         16      // Max Bits Per Sample
+-#define SPEAKER_OFFLOAD_MIN_SAMPLE_RATE             44100   // Min Sample Rate
++#define SPEAKER_OFFLOAD_MIN_SAMPLE_RATE             48000   // Min Sample Rate
+ #define SPEAKER_OFFLOAD_MAX_SAMPLE_RATE             48000   // Max Sample Rate
+ 
+ #define SPEAKER_LOOPBACK_MAX_CHANNELS               SPEAKER_HOST_MAX_CHANNELS          // Must be equal to host pin's Max Channels.
+@@ -44,7 +44,7 @@ Abstract:
+ #define SPEAKER_DOLBY_DIGITAL_MAX_CHANNELS          2       // Max Channels.
+ #define SPEAKER_DOLBY_DIGITAL_MIN_BITS_PER_SAMPLE   16      // Min Bits Per Sample
+ #define SPEAKER_DOLBY_DIGITAL_MAX_BITS_PER_SAMPLE   16      // Max Bits Per Sample
+-#define SPEAKER_DOLBY_DIGITAL_MIN_SAMPLE_RATE       44100   // Min Sample Rate
++#define SPEAKER_DOLBY_DIGITAL_MIN_SAMPLE_RATE       48000   // Min Sample Rate
+ #define SPEAKER_DOLBY_DIGITAL_MAX_SAMPLE_RATE       44100   // Max Sample Rate
+ 
+ //
+@@ -58,340 +58,39 @@ Abstract:
+ static 
+ KSDATAFORMAT_WAVEFORMATEXTENSIBLE SpeakerAudioEngineSupportedDeviceFormats[] =
+ {
+-    { // 0 : First entry in this table is the default format for the audio engine
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                44100,
+-                176400,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 1
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                24000,
+-                96000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 2
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                48000,
+-                192000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 3
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                88200,
+-                352800,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 4
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                96000,
+-                384000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 2, 48000, 192000, 4, 16,
++            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_STEREO, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM) }
+     }
+ };
+ 
+ static 
+ KSDATAFORMAT_WAVEFORMATEXTENSIBLE SpeakerHostPinSupportedDeviceFormats[] =
+ {
+-    { // 0
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                24000,
+-                96000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE)-sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 1
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                32000,
+-                128000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE)-sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 2
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                44100,
+-                176400,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE)-sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 3
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                48000,
+-                192000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 4
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                88200,
+-                352800,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 5
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                96000,
+-                384000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 2, 48000, 192000, 4, 16,
++            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_STEREO, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM) }
+     }
+ };
+ 
+ static 
+ KSDATAFORMAT_WAVEFORMATEXTENSIBLE SpeakerOffloadPinSupportedDeviceFormats[] =
+ {
+-    { // 0
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                44100,
+-                176400,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
+-    },
+-    { // 1
+-        {
+-            sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE),
+-            0,
+-            0,
+-            0,
+-            STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
+-            STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
+-        },
+-        {
+-            {
+-                WAVE_FORMAT_EXTENSIBLE,
+-                2,
+-                48000,
+-                192000,
+-                4,
+-                16,
+-                sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+-            },
+-            16,
+-            KSAUDIO_SPEAKER_STEREO,
+-            STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM)
+-        }
++    {
++        { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
++          STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO), STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
++          STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) },
++        { { WAVE_FORMAT_EXTENSIBLE, 2, 48000, 192000, 4, 16,
++            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) },
++          16, KSAUDIO_SPEAKER_STEREO, STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM) }
+     }
+ };
+ 
+@@ -403,27 +102,27 @@ MODE_AND_DEFAULT_FORMAT SpeakerHostPinSupportedDeviceModes[] =
+ {
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_RAW,
+-        &SpeakerHostPinSupportedDeviceFormats[3].DataFormat  // 48KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_DEFAULT,
+-        &SpeakerHostPinSupportedDeviceFormats[3].DataFormat  // 48KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_MEDIA,
+-        &SpeakerHostPinSupportedDeviceFormats[3].DataFormat  // 48KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_MOVIE,
+-        &SpeakerHostPinSupportedDeviceFormats[3].DataFormat  // 48KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_COMMUNICATIONS,
+-        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 24KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_NOTIFICATION,
+-        &SpeakerHostPinSupportedDeviceFormats[3].DataFormat  // 48KHz
++        &SpeakerHostPinSupportedDeviceFormats[0].DataFormat  // 48KHz
+     }
+ };
+ 
+@@ -432,11 +131,11 @@ MODE_AND_DEFAULT_FORMAT SpeakerOffloadPinSupportedDeviceModes[] =
+ {
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_DEFAULT,
+-        &SpeakerOffloadPinSupportedDeviceFormats[1].DataFormat // 48KHz
++        &SpeakerOffloadPinSupportedDeviceFormats[0].DataFormat // 48KHz
+     },
+     {
+         STATIC_AUDIO_SIGNALPROCESSINGMODE_MEDIA,
+-        &SpeakerOffloadPinSupportedDeviceFormats[1].DataFormat // 48KHz
++        &SpeakerOffloadPinSupportedDeviceFormats[0].DataFormat // 48KHz
+     }
+ };
+ 
+@@ -647,6 +346,14 @@ PCPROPERTY_ITEM PropertiesSpeakerOffloadPin[] =
+ DEFINE_PCAUTOMATION_TABLE_PROP(AutomationSpeakerOffloadPin, PropertiesSpeakerOffloadPin);
+ 
+ //=============================================================================
++NTSTATUS PropertyHandler_AudioFlowLoopbackCaps(_In_ PPCPROPERTY_REQUEST Request);
++static PCPROPERTY_ITEM PropertiesAudioFlowLoopbackPin[] =
++{
++    { &KSPROPSETID_AudioLoopback, KSPROPERTY_AUDIOLOOPBACK_TAPPOINT_CAPS,
++      KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT, PropertyHandler_AudioFlowLoopbackCaps }
++};
++DEFINE_PCAUTOMATION_TABLE_PROP(AutomationAudioFlowLoopbackPin, PropertiesAudioFlowLoopbackPin);
++
+ static
+ PCPIN_DESCRIPTOR SpeakerWaveMiniportPins[] =
+ {
+@@ -695,7 +402,7 @@ PCPIN_DESCRIPTOR SpeakerWaveMiniportPins[] =
+         SPEAKER_MAX_OUTPUT_LOOPBACK_STREAMS,
+         SPEAKER_MAX_OUTPUT_LOOPBACK_STREAMS, 
+         0,
+-        NULL,
++        &AutomationAudioFlowLoopbackPin,
+         {
+             0,
+             NULL,
+--- a/EndpointsCommon/MiniportAudioEngineNode.cpp
++++ b/EndpointsCommon/MiniportAudioEngineNode.cpp
+@@ -1150,6 +1150,8 @@ Return Value:
+     if (NT_SUCCESS(ntStatus))
+     {
+         m_LoopbackProtection = ulProtectionOption;
++        MuteLoopback(ulProtectionOption == CONSTRICTOR_OPTION_MUTE ||
++            m_MixDrmRights.CopyProtect || m_MixDrmRights.DigitalOutputDisable);
+     }
+     else 
+     {
+--- /dev/null
++++ b/EndpointsCommon/AudioFlowLoopback.h
+@@ -0,0 +1,135 @@
++// AudioFlow's fixed-format render mixer. No allocation, floating point, or OS calls.
++// The miniport serializes every operation with its loopback spin lock.
++#pragma once
++
++class AudioFlowLoopback
++{
++public:
++    using uint32_t = unsigned int;
++    using uint64_t = unsigned long long;
++    using int16_t = short;
++    using int32_t = int;
++    static_assert(sizeof(int16_t) == 2 && sizeof(int32_t) == 4 && sizeof(uint64_t) == 8, "PCM types");
++    static constexpr uint32_t SampleRate = 48000;
++    static constexpr uint32_t Channels = 2;
++    static constexpr uint32_t FrameBytes = 4;
++    static constexpr uint32_t SourceCount = 9; // Six host and three offload pins.
++    static constexpr uint32_t CapacityFrames = 8192;
++    static constexpr uint32_t DelayFrames = 1440; // 30 ms for independently scheduled DPCs.
++    static constexpr uint32_t InvalidSource = 0xFFFFFFFFu;
++
++    void Initialize()
++    {
++        muted = false;
++        for (auto& source : sources)
++        {
++            source.occupied = false;
++            source.first = source.end = 0;
++        }
++    }
++
++    uint32_t Acquire()
++    {
++        for (uint32_t i = 0; i < SourceCount; ++i)
++        {
++            if (!sources[i].occupied)
++            {
++                sources[i].occupied = true;
++                Reset(i);
++                return i;
++            }
++        }
++        return InvalidSource;
++    }
++
++    void Reset(uint32_t id)
++    {
++        if (id < SourceCount) sources[id].first = sources[id].end = 0;
++    }
++
++    void Release(uint32_t id)
++    {
++        if (id < SourceCount)
++        {
++            Reset(id);
++            sources[id].occupied = false;
++        }
++    }
++
++    void SetMuted(bool value)
++    {
++        // Forget protected history on both transitions, including before unmuting.
++        if (value != muted)
++            for (uint32_t i = 0; i < SourceCount; ++i) Reset(i);
++        muted = value;
++    }
++
++    void Write(uint32_t id, uint64_t frame, const int16_t* samples, uint32_t frames)
++    {
++        if (muted || id >= SourceCount || !sources[id].occupied || frames == 0) return;
++        auto& source = sources[id];
++        // Preserve history that delayed capture has not read yet. A forward
++        // gap silences only the missing frames; it must not erase the earlier
++        // valid interval. Rewinds and gaps beyond ring capacity start fresh.
++        if (frame < source.end || frame - source.end >= CapacityFrames)
++            source.first = source.end = frame;
++        else if (frame > source.end)
++        {
++            for (uint64_t missing = source.end; missing < frame; ++missing)
++            {
++                const auto offset = static_cast<uint32_t>(missing % CapacityFrames) * Channels;
++                source.samples[offset] = source.samples[offset + 1] = 0;
++            }
++        }
++        if (frames > CapacityFrames)
++        {
++            const auto skip = frames - CapacityFrames;
++            frame += skip;
++            samples += skip * Channels;
++            frames = CapacityFrames;
++            source.first = frame;
++        }
++        for (uint32_t i = 0; i < frames; ++i)
++        {
++            const auto offset = static_cast<uint32_t>((frame + i) % CapacityFrames) * Channels;
++            source.samples[offset] = samples[i * Channels];
++            source.samples[offset + 1] = samples[i * Channels + 1];
++        }
++        source.end = frame + frames;
++        if (source.end - source.first > CapacityFrames) source.first = source.end - CapacityFrames;
++    }
++
++    void Read(uint64_t frame, int16_t* samples, uint32_t frames) const
++    {
++        // Reading never consumes data: multiple capture clients see the same mix.
++        for (uint32_t i = 0; i < frames; ++i)
++        {
++            int32_t left = 0, right = 0;
++            const auto current = frame + i;
++            const auto offset = static_cast<uint32_t>(current % CapacityFrames) * Channels;
++            if (!muted)
++                for (const auto& source : sources)
++                    if (source.occupied && current >= source.first && current < source.end)
++                    {
++                        left += source.samples[offset];
++                        right += source.samples[offset + 1];
++                    }
++            samples[i * Channels] = Saturate(left);
++            samples[i * Channels + 1] = Saturate(right);
++        }
++    }
++
++private:
++    static int16_t Saturate(int32_t value)
++    {
++        return static_cast<int16_t>(value > 32767 ? 32767 : value < -32768 ? -32768 : value);
++    }
++    struct Source
++    {
++        bool occupied;
++        uint64_t first, end;
++        int16_t samples[CapacityFrames * Channels];
++    };
++    bool muted;
++    Source sources[SourceCount];
++};
+--- /dev/null
++++ b/EndpointsCommon/AudioFlowTiming.h
+@@ -0,0 +1,9 @@
++#pragma once
++
++// A delayed callback reports the latest completed packet. Missed periods must
++// not become repeated notifications for that same packet on subsequent ticks.
++inline unsigned long long AudioFlowNotificationRemainder(
++    unsigned long long elapsedHns, unsigned long long intervalHns)
++{
++    return intervalHns ? elapsedHns % intervalHns : 0;
++}

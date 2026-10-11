@@ -1,47 +1,80 @@
-# Build output, local packaging, and scratch work
-**/bin/
-**/obj/
-publish/
-outputs/
-artifacts/
-work/
-TestResults/
+## .NET / Visual Studio
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
 .vs/
-.idea/
-.vscode/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+artifacts/
+
+# Build logs
+[Ll]og/
+[Ll]ogs/
 *.log
-*.dmp
-*.tmp
-*.bak
-*.backup
-# Local profiles, device identifiers, and recovery data
-settings.json*
-appsettings.Local.json
-# Credentials, signing material, generated installers
-.env
-.env.*
-!.env.example
-*.pfx
-*.p12
-*.pem
-*.key
-*.cer
-*.crt
-*.snk
+*.binlog
+
+# Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+*.nuget.props
+*.nuget.targets
+project.lock.json
+
+# MSIX packaging output
+AppPackages/
+BundleArtifacts/
 *.msix
-*.msixbundle
+*.msixupload
 *.appx
 *.appxbundle
-*.exe
+*.appxupload
+
+# Build output
+build-*/
+*.xbf
+publish/
+*.pubxml
+PublishScripts/
+
+# Code analysis and tooling
+_ReSharper*/
+*.DotSettings.user
+*.dotCover
+.idea/
+
+# Generated files
+Generated\ Files/
+*_wpftmp.csproj
+
+
+# Driver build and VM test artifacts
+driver/upstream/
+driver/package/
+driver/test-bundle/
+driver/test-results/
+*.sys
+*.cat
+*.pfx
+*.p12
+*.key
+*.pem
+*.cer
 *.dll
+*.exe
+*.lib
 *.pdb
-*.zip
-*.7z
-# Operating system files
-Thumbs.db
-Desktop.ini
-.DS_Store
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.vcxproj.user
+graphify-out/

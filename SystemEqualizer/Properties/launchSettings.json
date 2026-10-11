@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "SystemEqualizer (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "SystemEqualizer (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

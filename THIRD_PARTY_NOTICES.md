@@ -1,9 +1,10 @@
 # Third-party notices
 
-The current C# projects contain no external NuGet PackageReference dependencies. They use the .NET Windows desktop framework and Windows APIs, which are provided under their respective platform terms.
+AudioFlow uses .NET and Windows APIs, Microsoft Windows App SDK, Microsoft Windows SDK build tooling, and NAudio through the PackageReference entries in `AudioFlow.csproj`. Their upstream licenses and redistribution terms apply.
 
-PEQ coefficient equations are informed by the [W3C Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/), based on Robert Bristow-Johnson's Audio EQ Cookbook. AudioFlow's implementation and deterministic musical preview sample are source code in this repository.
+The prototype virtual audio driver in `driver/src/` derives from Microsoft's SysVAD sample. Its Microsoft Public License and original copyright notices are retained in [driver/src/LICENSE](driver/src/LICENSE). See [driver/README.md](driver/README.md) for source provenance.
 
-Equalizer APO and HeSuVi are discussed as possible interoperability paths; their binaries/configurations are not included. Dolby, DTS, and other third-party trademarks belong to their respective owners. No endorsement is implied.
+PEQ coefficient equations are informed by the [W3C Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/), based on Robert Bristow-Johnson's Audio EQ Cookbook.
 
-New third-party code, datasets, media, or packaged runtime redistribution must receive an appropriate license/provenance review and notices before inclusion.
+Third-party trademarks belong to their respective owners. Include provenance and required notices when adding code, datasets, media, or runtime redistribution.
+

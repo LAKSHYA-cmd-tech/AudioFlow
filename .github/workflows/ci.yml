@@ -1,4 +1,4 @@
-name: Windows build and regression checks
+name: Windows build
 on:
   push:
     branches: [main]
@@ -10,25 +10,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  regression:
+  build:
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      AUDIOFLOW_SMOKE_OUTPUT: '0'
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
-      - name: Restore projects
-        run: dotnet restore tests/Regression/Regression.csproj --configfile tests/NuGet.Config
-      - name: Build Release application and regression runner
-        run: dotnet build tests/Regression/Regression.csproj -c Release --no-restore
-      - name: Check version synchronization
-        run: ./installer/Sync-Version.ps1 -Check
-      - name: Run offline regression checks
-        env:
-          AUDIOFLOW_TEST_ROOT: ${{ runner.temp }}/audioflow-tests
-        run: dotnet tests/Regression/bin/Release/net8.0-windows/Regression.dll
+          dotnet-version: '10.0.x'
+      - name: Restore application
+        run: dotnet restore AudioFlow.csproj -p:Platform=x64
+      - name: Build Release application
+        run: dotnet build AudioFlow.csproj -c Release --no-restore -p:Platform=x64
+
+      - name: Run playback-buffer regression checks
+        run: dotnet run --project driver/tests/PlaybackBufferTests/PlaybackBufferTests.csproj -c Release
