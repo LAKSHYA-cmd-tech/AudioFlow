@@ -20,6 +20,7 @@
     <EnableMsixTooling>false</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <DefaultItemExcludes>$(DefaultItemExcludes);SystemEqualizer\**;MyWinUIApp\**;driver\tests\**</DefaultItemExcludes>
@@ -59,9 +60,9 @@
     <PropertyGroup> above to opt out.
   -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="*" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="*" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="*" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.7.1" />
     <PackageReference Include="NAudio" Version="3.1.0" />
   </ItemGroup>
 

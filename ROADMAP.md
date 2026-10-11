@@ -1,44 +1,34 @@
-> Historical roadmap for the previous WPF prototype. See README.md for the current Desktop WinUI version.
+# AudioFlow roadmap
 
-# Roadmap
+AudioFlow is an early WinUI audio-processing prototype. These are contribution opportunities and completion criteria, not shipped-feature claims or promised dates.
 
-These are development intentions, not commitments or delivery dates.
+## Make source builds dependable
 
-## Implemented foundations
+- [x] Replace stale WPF build/documentation references with the current WinUI/.NET 10 setup.
+- [x] Pin primary application dependencies and commit restore lockfiles.
+- [x] Provide one-command local verification and CI for application build, DSP, buffers, and prepared-driver source.
+- [ ] Add a fresh WinUI screenshot walkthrough. Done when screenshots match current `main`, explain setup, and contain no private device/profile information.
 
-- [x] Windows audio-session mixer, master volume/mute, and output enumeration
-- [x] Prototype default-output switching
-- [x] Saved profiles and ordered process/device automation
-- [x] Tray operation, startup handling, and single-instance activation
-- [x] Versioned settings, backups, and recovery
-- [x] Editable EQ and an app-owned real-time sample preview
-- [x] Executable regression checks and Windows CI configuration
+## Validate everyday audio use
 
-## Next: reliability and reproducibility
+- [ ] Collect reproducible hardware reports for at least two virtual-endpoint/hardware-output combinations. Record formats, Windows build, bypass behavior, and results without implying untested compatibility.
+- [ ] Validate device loss/default-device changes. Done when processing stops/restarts predictably with a documented route and no feedback loop.
+- [ ] Verify profile round trips. Done when automated checks cover EQ, preamp, spatial settings, bypass, and malformed/legacy JSON behavior.
+- [ ] Audit keyboard interaction and accessibility. Done when controls expose useful names, focus order is documented, and numeric edits work without a pointer.
 
-- [ ] Complete physical USB/DAC/Bluetooth and sleep/resume checks
-- [ ] Validate actual COM callback and output-switching behavior across Windows versions
-- [ ] Handle output invalidation and default-device changes during preview
-- [ ] Repeat clean-machine install/update/uninstall and startup tests
-- [ ] Improve interop documentation based on verified Windows API behavior
-- [ ] Review the .NET support lifecycle and plan the next supported target
+## Validate the virtual driver
 
-## System-wide processing
+- [ ] Complete the VM checklist against the current driver source. Preserve raw-capture analysis and explicit pass/fail results with synthetic audio.
+- [ ] Verify real render-to-loopback transport, multiple readers, format negotiation, protected-history clearing, and restart behavior.
+- [ ] Prepare release signing and an installer only after source, package, VM, and hardware validation.
 
-- [ ] Design optional integration with separately installed Equalizer APO, with backup and bypass
-- [ ] Review licensing and packaging before any redistribution
-- [ ] Evaluate a native system-wide backend and its deployment requirements
-- [ ] Add a production WASAPI app-owned output backend
-- [ ] Connect supported processing stages to a real renderer and validate on physical devices
+## Contributor-sized starting points
 
-System-wide DSP is not implemented today. An app-owned preview or saved chain is not evidence of system-wide processing.
+| Task | Starting files | Acceptance |
+| --- | --- | --- |
+| Current UI walkthrough | `docs/`, `MainWindow.xaml` | Accurate screenshots and a complete first playback path |
+| Profile compatibility tests | `AudioFlowProfile.cs`, `Audio/UserSettings.cs` | Round trip plus malformed/legacy data cases |
+| Hardware report | `docs/audio-setup.md` | Reproducible setup and sanitized listening/device evidence |
+| Keyboard audit | `MainWindow.xaml`, `MainWindow.xaml.cs` | Concrete focus/navigation findings and a verified correction |
 
-## Later product work
-
-- [ ] Refine accessibility, themes, navigation, and onboarding after reliability work
-- [ ] Create verified product screenshots and a signed release process
-- [ ] Replace development package identity/assets and complete Store submission checks
-- [ ] Evaluate original or appropriately licensed HRTF/spatial components
-- [ ] Consider Free/Pro boundaries after beta feedback; no payment implementation yet
-
-No proprietary Dolby/DTS technology or captured proprietary virtualization responses are planned for redistribution.
+Open a scoped issue before larger changes. Include validation results in pull requests and keep generated output out of commits.

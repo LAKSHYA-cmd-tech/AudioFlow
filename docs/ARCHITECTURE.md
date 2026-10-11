@@ -1,35 +1,40 @@
-# Architecture and implementation limits
+# Architecture
 
-AudioFlow is one .NET 8 WPF application with a separate executable regression project.
+AudioFlow is a local WinUI application. Its primary project is `AudioFlow.csproj`; it excludes the companion applications and standalone driver test code from its compilation.
 
-| Component | Responsibility |
-| --- | --- |
-| MainViewModel | UI state, profile selection, lifecycle, and refresh orchestration |
-| IAudioService / WindowsAudioService | Audio contract and Windows Core Audio COM adapter |
-| IAudioChangeNotifier | Optional device/master change signals |
-| AutomationService | Ordered rule evaluation from a process/device snapshot |
-| ProfileService | Output availability and saved app-level restoration |
-| SettingsStore | Versioned JSON, validation, atomic persistence, backup/recovery |
-| IProcessingEngine | Boundary for future system-wide processing |
-| PassthroughProcessingEngine | Reports system processing unavailable |
-| PeqProcessor | Per-channel filter state over floating-point sample buffers |
-| LiveEqPreviewStream | App-owned sample processing and waveform output |
-| StartupService / TrayService | Startup preferences and tray lifecycle |
+## Source map
 
-## Notifications and polling
+| Area | Files | Responsibility |
+| --- | --- | --- |
+| Application entry | `App.xaml`, `App.xaml.cs` | WinUI startup and resources |
+| Main interface | `MainWindow.xaml`, `MainWindow.xaml.cs` | EQ, meters, spatial controls, profiles, and UI events |
+| Routing | `Audio/EqualizerEngine.cs` | Capture/playback endpoints and audio lifecycle |
+| Callback processing | `Audio/EqualizerProcessor.cs` | Filter bank, preamp, spatial processing, bypass transition, limiter, metering |
+| Filters and defaults | `Audio/Biquad.cs`, `Audio/EqBand.cs` | Biquad coefficients and eleven default bands |
+| Spatial mix | `Audio/SpatialProcessor.cs` | Eight-node settings converted to a stereo matrix |
+| Output ceiling | `Audio/PeakLimiter.cs` | Stereo-linked limiting and limiter telemetry |
+| Spectrum | `Audio/SpectrumAnalyzer.cs` | Bounded analysis ring and background FFT worker |
+| Playback buffering | `Audio/PlaybackBuffer.cs` | Reserve and recovery for capture/playback timing differences |
+| Profiles and presets | `AudioFlowProfile.cs`, `Audio/UserSettings.cs`, `Audio/PresetLibrary.cs`, `Audio/AutoEqDatabase.cs` | Profile data, persistence, and tuning library |
+| Virtual endpoint | `driver/src/`, `driver/AudioFlowOutput.inx` | SysVAD-derived prototype transport and INF |
+| Regression checks | `driver/tests/DspTests/`, `driver/tests/PlaybackBufferTests/` | Standalone checks against real application processing sources |
 
-The current Windows adapter registers device and endpoint-volume callbacks. It does not register audio-session creation callbacks. Device/master signals are debounced and dispatched to the UI owner. A five-second view-model timer refreshes sessions and evaluates automation.
+## Thread boundaries
 
-The local COM declarations have prototype compatibility assumptions. Treat them as an area requiring targeted integration tests, rather than a general prescription for Windows COM implementations. Source-level fake tests cannot validate ABI or physical endpoints.
+The UI publishes replacement filter-bank snapshots rather than taking a lock inside `EqualizerProcessor.Read`. Spatial settings are converted to a stereo matrix when settings change. The callback processes stereo samples, records scalar meter values, and pushes post-EQ samples into the analyzer ring.
 
-## Profiles and processing
+The analyzer computes windowed FFT frames on a background worker. If its ring fills, analysis data is dropped rather than blocking audio playback. The UI reads published meters and spectrum bins independently of the callback.
 
-Profiles store mixer values and DSP settings. Automation uses displayed priority order. Manual profile selection remains until the winning rule changes or rules are explicitly changed; no matching rule leaves the current profile selected.
+## Playback stages
 
-The default processing engine reports NotAvailable. The separate preview stream processes only its own synthesized stereo sample. It applies the visible EQ bands, crossfades settings changes, and bounds PCM output. It does not render the saved compressor, limiter, or crossfeed stages, route third-party audio, install a driver, or alter Equalizer APO configuration.
+```text
+source -> EQ filters and macro filters -> preamp -> spatial matrix
+       -> optional night-mode gain -> bypass blend -> limiter -> output
+                                                 -> post-EQ spectrum analysis
+```
 
-## Deployment boundaries
+Input/output meters are calculated inside the callback. Filter updates blend old and new filter state across a short transition. Profile state and route selection have different lifecycles; importing a profile should not silently restore stale device identifiers.
 
-Default-output switching relies on undocumented PolicyConfig COM interfaces. The MSIX manifest uses a local development identity and full-trust desktop execution. Portable startup uses the current-user Run key; packaged startup is managed through Windows.
+## Validation boundaries
 
-Future native system processing needs its own supported Windows integration and packaging evaluation. A WPF executable or MSIX package alone does not establish an audio driver, system-wide DSP, or Store eligibility.
+The standalone test projects compile the application DSP/buffer files directly. They can detect changes in those components without launching WinUI. The driver and actual WASAPI route require separate Windows/VM/hardware evidence. See [development.md](development.md) for the automated coverage and its limits.

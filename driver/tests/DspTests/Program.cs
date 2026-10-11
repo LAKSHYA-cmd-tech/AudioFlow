@@ -29,6 +29,17 @@ for (int trial = 0; trial < 1000; trial++)
 }
 Console.WriteLine("PASS: 1,000 spatial configurations preserve the original mix.");
 
+// Verify that the allocation measurement can detect a deliberately allocating source.
+{
+    using var analyzer = new SpectrumAnalyzer(48000);
+    var processor = new EqualizerProcessor(new AllocatingSource(), analyzer,
+        new SpatialProcessor(), EqBand.CreateDefaults());
+    var samples = new float[960];
+    MeasureRead(processor, samples);
+    Check(MeasureRead(processor, samples).Allocated > 0, "Allocation measurement missed a known allocation.");
+}
+Console.WriteLine("PASS: callback allocation measurement detects an allocating source.");
+
 foreach (bool processed in new[] { false, true })
 {
     using var analyzer = new SpectrumAnalyzer(48000);
@@ -40,12 +51,14 @@ foreach (bool processed in new[] { false, true })
     var processor = new EqualizerProcessor(source, analyzer, spatial, bands);
     processor.SetBypass(!processed);
     var samples = new float[960];
-    for (int warm = 0; warm < 100; warm++) processor.Read(samples);
-    long allocated = GC.GetAllocatedBytesForCurrentThread();
+    for (int warm = 0; warm < 100; warm++) MeasureRead(processor, samples);
+    long renderedAllocations = 0;
     int silentRun = 0;
     for (int block = 0; block < 3000; block++)
     {
-        Check(processor.Read(samples) == samples.Length, "DSP shortened a callback.");
+        var result = MeasureRead(processor, samples);
+        renderedAllocations += result.Allocated;
+        Check(result.Count == samples.Length, "DSP shortened a callback.");
         for (int i = 0; i < samples.Length; i += 2)
         {
             Check(float.IsFinite(samples[i]) && float.IsFinite(samples[i + 1]) &&
@@ -57,8 +70,17 @@ foreach (bool processed in new[] { false, true })
                     "Bypassed low-level playback changed the source signal.");
         }
     }
-    Check(GC.GetAllocatedBytesForCurrentThread() == allocated, "DSP allocated memory on the render thread.");
+    Check(renderedAllocations == 0, $"DSP allocated {renderedAllocations:N0} bytes on the render thread ({(processed ? "processed" : "bypassed")}).");
     Console.WriteLine($"PASS: 30 s of 50 Hz/6 kHz transitions, {(processed ? "EQ + spatial" : "bypassed")}; no inserted silence or render-thread allocations.");
+}
+
+// Keep assertions and unrelated runtime work outside the render-thread
+// allocation sample. Warm this exact call path before requiring zero allocations.
+static (int Count, long Allocated) MeasureRead(EqualizerProcessor processor, float[] samples)
+{
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    int count = processor.Read(samples);
+    return (count, GC.GetAllocatedBytesForCurrentThread() - before);
 }
 
 sealed class AlternatingTones : ISampleProvider
@@ -76,6 +98,19 @@ sealed class AlternatingTones : ISampleProvider
             samples[i + 1] = LastBlock[i + 1] = (float)(0.25 * Math.Sin(phase + 0.7));
             phase = (phase + 2 * Math.PI * hz / 48000) % (2 * Math.PI);
         }
+        return samples.Length;
+    }
+}
+
+sealed class AllocatingSource : ISampleProvider
+{
+    public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+    public byte[] LastAllocation { get; private set; } = [];
+
+    public int Read(Span<float> samples)
+    {
+        LastAllocation = new byte[32];
+        samples.Clear();
         return samples.Length;
     }
 }

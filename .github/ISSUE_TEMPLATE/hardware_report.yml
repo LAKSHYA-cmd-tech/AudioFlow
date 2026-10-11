@@ -1,0 +1,31 @@
+name: Hardware and playback report
+description: Share reproducible audio setup and listening results
+title: '[Hardware]: '
+body:
+  - type: input
+    id: commit
+    attributes:
+      label: AudioFlow commit
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Windows and device setup
+      description: Windows build, virtual endpoint type, hardware output model, and sample rate/channels. Redact device IDs and private paths.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks and reproduction steps
+      description: Include normal playback, bypass comparison, and any device change or restart tested.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results and limitations
+      description: State pass/fail, audible problems, and what was not tested. A single report does not establish general compatibility.
+    validations:
+      required: true

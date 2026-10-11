@@ -10,4 +10,4 @@ For UI changes, attach screenshots with synthetic data.
 ## Scope and limitations
 
 Mention known gaps, deployment implications, or new dependencies/licenses.
-Do not claim system-wide DSP based on saved settings or preview playback.
+Distinguish synthetic DSP/buffer checks from real WASAPI route, driver, and listening tests.

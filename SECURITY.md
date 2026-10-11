@@ -14,4 +14,4 @@ Include the affected commit/version, impact, reproduction steps, and a minimal e
 
 AudioFlow controls local Windows audio and can persist profiles and startup preferences. Default-output switching uses an undocumented Windows interface. Logs and saved settings can contain paths, app names, and device identifiers.
 
-Signing material and local install/update backups must remain outside Git. The current DSP preview does not intercept other applications' audio. No telemetry service or account backend is part of this source.
+Signing material and local install/update backups must remain outside Git. The application captures a supported default virtual endpoint via WASAPI loopback and plays processed audio to a separate output. The AudioFlow Output driver is an experimental kernel component. No telemetry service or account backend is part of this source.

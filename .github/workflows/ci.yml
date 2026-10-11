@@ -1,4 +1,4 @@
-name: Windows build
+name: Windows build and audio checks
 on:
   push:
     branches: [main]
@@ -10,7 +10,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  build:
+  windows:
+    name: WinUI build and driver source
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -20,10 +21,33 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - name: Restore application
-        run: dotnet restore AudioFlow.csproj -p:Platform=x64
+      - name: Restore locked application dependencies
+        run: dotnet restore AudioFlow.csproj --locked-mode -p:Platform=x64
       - name: Build Release application
         run: dotnet build AudioFlow.csproj -c Release --no-restore -p:Platform=x64
-
-      - name: Run playback-buffer regression checks
-        run: dotnet run --project driver/tests/PlaybackBufferTests/PlaybackBufferTests.csproj -c Release
+      - name: Verify prepared driver source
+        shell: pwsh
+        run: ./driver/Verify-DriverSource.ps1
+  audio:
+    name: Audio regression checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore locked DSP dependencies
+        run: dotnet restore driver/tests/DspTests/DspTests.csproj --locked-mode
+      - name: Check DSP and callback allocations
+        run: dotnet run --project driver/tests/DspTests/DspTests.csproj -c Release --no-restore
+      - name: Restore locked buffer dependencies
+        run: dotnet restore driver/tests/PlaybackBufferTests/PlaybackBufferTests.csproj --locked-mode
+      - name: Check playback buffering and recovery
+        run: dotnet run --project driver/tests/PlaybackBufferTests/PlaybackBufferTests.csproj -c Release --no-restore

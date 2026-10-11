@@ -15,7 +15,7 @@ body:
     id: windows
     attributes:
       label: Windows version and deployment
-      description: Include build number and source, portable, or MSIX deployment.
+      description: Include build number and source build or local development deployment.
     validations:
       required: true
   - type: textarea
@@ -34,4 +34,4 @@ body:
     id: evidence
     attributes:
       label: Sanitized evidence
-      description: Screenshots, relevant log excerpts, or device category. EQ preview does not process other applications.
+      description: Screenshots, relevant log excerpts, virtual endpoint type, hardware output, and sample rate/channels.
